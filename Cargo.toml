@@ -1,0 +1,10 @@
+[package]
+name = "pcap_ts_extract"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pcap-parser = { version = "0.17", features = ["data"] }
+etherparse = "0.19"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
