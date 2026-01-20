@@ -1,0 +1,14 @@
+[package]
+name = "pcap_ts_desktop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+eframe = "0.30"
+egui = "0.30"
+rfd = "0.15"
+pcap_ts_core = { path = "../core" }
+crossbeam-channel = "0.5"
+image = { version = "0.25", default-features = false, features = ["png"] }
+

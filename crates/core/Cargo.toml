@@ -1,0 +1,10 @@
+[package]
+name = "pcap_ts_core"
+version = "0.1.0"
+edition = "2024"
+description = "Core library for extracting MPEG-TS packets from UDP (optionally RTP) in PCAP/PCAPNG"
+
+[dependencies]
+pcap-parser = { version = "0.17", features = ["data"] }
+etherparse = "0.19"
+anyhow = "1"

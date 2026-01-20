@@ -1,12 +1,7 @@
-[package]
-name = "pcap_ts_extract"
-version = "1.1.0"
-edition = "2024"
-description = "CLI Version of pcap_ts_extract"
-authors = ["Jonn Sandon <jonn42@gmail.com>"]
-
-[dependencies]
-pcap-parser = { version = "0.17", features = ["data"] }
-etherparse = "0.19"
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
+[workspace]
+resolver = "2"
+members = [
+  "crates/core",
+  "crates/cli",
+  "crates/desktop_egui",
+]
