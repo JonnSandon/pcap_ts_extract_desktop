@@ -1,5 +1,6 @@
 ﻿#![windows_subsystem = "windows"]
 
+//! Desktop GUI frontend built with eframe/egui.
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use eframe::egui;
@@ -11,6 +12,7 @@ use std::sync::{
 };
 
 
+/// Worker thread messages sent back to the UI.
 enum Msg {
     Log(String),
     Progress(pcap_ts_core::ExtractEvent),
@@ -18,6 +20,7 @@ enum Msg {
 }
 
 
+/// Application state for the desktop UI.
 struct DesktopApp {
     // inputs
     input: Option<PathBuf>,
@@ -61,6 +64,7 @@ impl Default for DesktopApp {
 }
 
 impl DesktopApp {
+    /// Validate inputs and launch the worker thread.
     fn start(&mut self) {
         self.last_error = None;
         self.last_report = None;
@@ -117,6 +121,7 @@ impl DesktopApp {
 
     }
 
+    /// Poll the worker channel and update the UI state.
     fn poll(&mut self) {
     let Some(rx) = self.rx.take() else { return; };
 
@@ -166,6 +171,7 @@ impl DesktopApp {
 
 }
 
+/// Worker entrypoint for running extraction off the UI thread.
 fn run_job(
     tx: Sender<Msg>,
     input: PathBuf,
@@ -188,6 +194,7 @@ fn run_job(
 
 
 impl eframe::App for DesktopApp {
+    /// Render the UI and handle interactions.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
 
@@ -198,7 +205,7 @@ impl eframe::App for DesktopApp {
 
             // File pickers
             ui.horizontal(|ui| {
-                if ui.button("Choose PCAP/PCAPNG…").clicked() && !self.running {
+                if ui.button("Choose PCAP/PCAPNG.").clicked() && !self.running {
                     if let Some(p) = rfd::FileDialog::new()
                         .add_filter("PCAP", &["pcap", "pcapng", "pcap1"])
                         .pick_file()
@@ -216,7 +223,7 @@ impl eframe::App for DesktopApp {
 
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!self.dry_run, |ui| {
-                    if ui.button("Choose output .ts…").clicked() && !self.running {
+                    if ui.button("Choose output .ts.").clicked() && !self.running {
                         if let Some(p) = rfd::FileDialog::new()
                             .set_file_name("output.ts")
                             .add_filter("Transport Stream", &["ts"])
@@ -276,7 +283,7 @@ impl eframe::App for DesktopApp {
                 });
 
                 if self.running {
-                    ui.label("Running…");
+                    ui.label("Running.");
                 }
             });
 
@@ -317,6 +324,7 @@ impl eframe::App for DesktopApp {
     }
 }
 
+/// Port editor for optional UDP port filters.
 fn port_editor(ui: &mut egui::Ui, port: &mut Option<u16>, running: bool) {
     // We use a temporary i32 for the widget, because Option<u16> doesn't directly bind.
     let mut val: i32 = port.map(|p| p as i32).unwrap_or(-1);
@@ -331,6 +339,7 @@ fn port_editor(ui: &mut egui::Ui, port: &mut Option<u16>, running: bool) {
     });
 }
 
+/// Entrypoint for desktop mode.
 fn main() -> eframe::Result<()> {
     let mut opts = eframe::NativeOptions::default();
 
@@ -359,4 +368,32 @@ fn load_app_icon() -> Option<egui::IconData> {
         width,
         height,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_state_is_consistent() {
+        let app = DesktopApp::default();
+        assert!(app.input.is_none());
+        assert!(app.output.is_none());
+        assert!(app.dst_port.is_none());
+        assert!(app.src_port.is_none());
+        assert!(app.strip_rtp);
+        assert_eq!(app.sync_checks, 3);
+        assert!(!app.dry_run);
+        assert!(!app.running);
+        assert!(app.rx.is_none());
+        assert!(app.log.is_empty());
+        assert!(app.last_report.is_none());
+        assert!(app.last_error.is_none());
+    }
+
+    #[test]
+    fn embedded_icon_decodes() {
+        let icon = load_app_icon();
+        assert!(icon.is_some());
+    }
 }

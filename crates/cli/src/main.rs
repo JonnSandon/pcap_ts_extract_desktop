@@ -1,42 +1,46 @@
+//! CLI frontend for `pcap_ts_core`.
+
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 
+/// CLI arguments for `pcap_ts_extract`.
 #[derive(Parser, Debug)]
 #[command(
     name = "pcap_ts_extract",
     about = "Extract MPEG-TS (188-byte) packets from UDP (optionally RTP) in a PCAP/PCAPNG"
 )]
 struct Args {
-    /// Input .pcap or .pcapng file
+    /// Input .pcap or .pcapng file.
     #[arg(short, long)]
     input: PathBuf,
 
-    /// Output .ts file
+    /// Output .ts file.
     #[arg(short, long)]
     output: PathBuf,
 
-    /// Filter UDP destination port (common: 1234, 5004, 10000, etc.)
+    /// Filter UDP destination port (common: 1234, 5004, 10000, etc.).
     #[arg(long)]
     dst_port: Option<u16>,
 
-    /// Filter UDP source port
+    /// Filter UDP source port.
     #[arg(long)]
     src_port: Option<u16>,
 
-    /// Try to detect and strip RTP header before TS re-sync
+    /// Try to detect and strip RTP header before TS re-sync.
     #[arg(long, default_value_t = true)]
     strip_rtp: bool,
 
-    /// How many consecutive sync checks to validate a candidate TS packet size
+    /// How many consecutive sync checks to validate a candidate TS packet size.
     #[arg(long, default_value_t = 3)]
     sync_checks: usize,
 
-    /// Stats only; do not write an output file
+    /// Stats only; do not write an output file.
     #[arg(long, default_value_t = false)]
     dry_run: bool,
 }
 
+/// Entrypoint for CLI mode.
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -71,4 +75,3 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-

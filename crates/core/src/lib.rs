@@ -1,3 +1,13 @@
+//! Core library for extracting MPEG-TS packets from UDP (optionally RTP) in PCAP/PCAPNG files.
+//!
+//! Design goals:
+//! - Treat PCAP and PCAPNG uniformly via `pcap-parser`.
+//! - Filter by UDP ports when requested.
+//! - Optionally strip RTP headers and re-sync to MPEG-TS packet boundaries.
+//! - Stream output to avoid unbounded memory growth.
+//!
+//! This crate exposes a small API surface so it can be used by both the CLI and GUI frontends.
+
 use anyhow::{anyhow, Context, Result};
 use etherparse::{PacketHeaders, TransportHeader};
 use pcap_parser::data::{get_packetdata, PacketData};
@@ -10,18 +20,28 @@ use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 
+/// Configuration for a PCAP extraction run.
 #[derive(Debug, Clone)]
 pub struct ExtractConfig {
+    /// Optional UDP destination port filter.
     pub dst_port: Option<u16>,
+    /// Optional UDP source port filter.
     pub src_port: Option<u16>,
+    /// If true, attempt to strip RTP headers before TS re-sync.
     pub strip_rtp: bool,
+    /// Number of consecutive sync checks for TS packet detection.
     pub sync_checks: usize,
+    /// If true, do not write output (stats only).
     pub dry_run: bool,
 }
+/// Progress events emitted by `extract_pcap_to_ts_with_events`.
 #[derive(Debug, Clone)]
 pub enum ExtractEvent {
+    /// Count of frames seen and UDP frames matched so far.
     Frame { frames_total: u64, udp_matched: u64 },
+    /// Detected TS packet size (188/192/204).
     DetectedPacketSize { size: usize },
+    /// Number of TS packets written so far.
     WrittenPackets { ts_packets_written: u64 },
 }
 
@@ -37,21 +57,30 @@ impl Default for ExtractConfig {
     }
 }
 
+/// Summary report returned after extraction completes.
 #[derive(Debug, Clone)]
 pub struct ExtractReport {
+    /// Total frames parsed from the capture.
     pub frames_total: u64,
+    /// UDP frames that matched filters and were processed.
     pub udp_matched: u64,
+    /// Detected TS packet size in bytes.
     pub detected_ts_packet_size: usize,
+    /// Number of TS packets written to output.
     pub ts_packets_written: u64,
+    /// Output path when not in dry-run mode.
     pub output: Option<PathBuf>,
+    /// Total elapsed time.
     pub elapsed: Duration,
 }
 
+/// Heuristically determine if a payload appears to be RTP.
 fn looks_like_rtp(payload: &[u8]) -> bool {
     // RTP: V=2 => top two bits of first byte are 10b (0x80..0xBF)
     payload.len() >= 12 && (payload[0] & 0xC0) == 0x80
 }
 
+/// Strip RTP header (including CSRC and extension), if present.
 fn strip_rtp(payload: &[u8]) -> &[u8] {
     if !looks_like_rtp(payload) {
         return payload;
@@ -77,6 +106,7 @@ fn strip_rtp(payload: &[u8]) -> &[u8] {
     &payload[off..]
 }
 
+/// Stateful writer that re-syncs TS packets and writes only aligned packets.
 struct TsResyncWriter<W: Write> {
     out: W,
     buf: Vec<u8>,
@@ -86,6 +116,7 @@ struct TsResyncWriter<W: Write> {
 }
 
 impl<W: Write> TsResyncWriter<W> {
+    /// Create a new TS re-syncing writer.
     fn new(out: W, packet_size: usize, sync_checks: usize) -> Self {
         Self {
             out,
@@ -96,6 +127,7 @@ impl<W: Write> TsResyncWriter<W> {
         }
     }
 
+    /// Check whether the buffer has a valid sync pattern at a given offset.
     fn validate_sync_at(&self, start: usize) -> bool {
         if self.buf.get(start) != Some(&0x47) {
             return false;
@@ -112,6 +144,7 @@ impl<W: Write> TsResyncWriter<W> {
         true
     }
 
+    /// Push a new payload chunk and write any aligned TS packets.
     fn push_payload(&mut self, payload: &[u8]) -> Result<()> {
         self.buf.extend_from_slice(payload);
 
@@ -164,12 +197,14 @@ impl<W: Write> TsResyncWriter<W> {
         }
     }
 
+    /// Flush underlying writer.
     fn flush_out(&mut self) -> Result<()> {
         self.out.flush()?;
         Ok(())
     }
 }
 
+/// Detect MPEG-TS packet size from a rolling buffer of bytes.
 fn detect_ts_packet_size(buf: &[u8], sync_checks: usize) -> Option<usize> {
     let candidates = [188usize, 192, 204];
     let mut best: Option<(usize, usize)> = None;
@@ -250,18 +285,43 @@ fn extract_packet_data<'a>(
 }
 
 /// Core API: extract MPEG-TS packets from UDP (optionally RTP) inside a PCAP/PCAPNG.
-/// Returns a report; writes output unless dry_run=true.
-
-
+///
+/// Returns a report; writes output unless `dry_run=true`.
+///
+/// # Example
+/// ```rust,no_run
+/// use pcap_ts_core::{ExtractConfig, extract_pcap_to_ts};
+/// use std::path::Path;
+///
+/// let cfg = ExtractConfig {
+///     dst_port: Some(5004),
+///     src_port: None,
+///     strip_rtp: true,
+///     sync_checks: 3,
+///     dry_run: true,
+/// };
+///
+/// let report = extract_pcap_to_ts(
+///     Path::new("capture.pcapng"),
+///     None,
+///     &cfg,
+/// )?;
+/// println!("TS packets: {}", report.ts_packets_written);
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 pub fn extract_pcap_to_ts(
     input: &Path,
     output: Option<&Path>,
     cfg: &ExtractConfig,
 ) -> Result<ExtractReport> {
     let cancel = AtomicBool::new(false);
-    extract_pcap_to_ts_with_events(input, output, cfg, &cancel,|_| {})
+    extract_pcap_to_ts_with_events(input, output, cfg, &cancel, |_| {})
 }
 
+/// Extraction API with progress events and cooperative cancellation.
+///
+/// The `on_event` callback is invoked periodically with progress metrics, and
+/// `cancel` can be set to true to abort the run.
 pub fn extract_pcap_to_ts_with_events<F: FnMut(ExtractEvent)>(
     input: &Path,
     output: Option<&Path>,
