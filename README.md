@@ -111,6 +111,119 @@ Run the desktop app:
 cargo run -p pcap_ts_desktop
 ```
 
+## macOS Release And DMG Packaging
+
+If you want a distributable macOS image that includes both frontends, the cleanest layout is:
+
+- `PCAPtoTS.app`: desktop GUI bundle for Finder / Launchpad usage
+- `bin/pcap_ts_extract`: CLI binary for terminal users
+
+One-command packaging:
+
+```bash
+./scripts/package-macos-dmg.sh
+```
+
+Or, if you prefer `make`:
+
+```bash
+make package-macos-dmg
+```
+
+That script:
+
+- builds both release binaries
+- creates a macOS `.app` bundle for the desktop frontend
+- adds the CLI binary under `bin/`
+- adds an `Applications` shortcut and `README.txt`
+- writes the finished DMG under `dist/`
+
+Expected output:
+
+- `dist/PCAPtoTS-1.1.0-macos.dmg`
+
+Manual flow, if you want to inspect or customize it:
+
+Build both release binaries:
+
+```bash
+cargo build --release --bins
+```
+
+That produces:
+
+- `target/release/pcap_ts_desktop`
+- `target/release/pcap_ts_extract`
+
+Create a staging folder for the DMG contents:
+
+```bash
+mkdir -p dist/dmg-root/PCAPtoTS.app/Contents/MacOS
+mkdir -p dist/dmg-root/PCAPtoTS.app/Contents/Resources
+mkdir -p dist/dmg-root/bin
+cp target/release/pcap_ts_desktop dist/dmg-root/PCAPtoTS.app/Contents/MacOS/PCAPtoTS
+cp target/release/pcap_ts_extract dist/dmg-root/bin/pcap_ts_extract
+chmod +x dist/dmg-root/PCAPtoTS.app/Contents/MacOS/PCAPtoTS
+chmod +x dist/dmg-root/bin/pcap_ts_extract
+```
+
+Create the app bundle metadata:
+
+```bash
+cat > dist/dmg-root/PCAPtoTS.app/Contents/Info.plist <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>PCAPtoTS</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.jonnsandon.pcapts.desktop</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>PCAPtoTS</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1.1.0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+</dict>
+</plist>
+PLIST
+```
+
+At this point you can test the GUI bundle directly:
+
+```bash
+open dist/dmg-root/PCAPtoTS.app
+```
+
+Create the compressed DMG:
+
+```bash
+hdiutil create \
+  -volname "PCAPtoTS" \
+  -srcfolder dist/dmg-root \
+  -format UDZO \
+  dist/PCAPtoTS-1.1.0-macos.dmg
+```
+
+The resulting image will contain:
+
+- `PCAPtoTS.app` for desktop users
+- `bin/pcap_ts_extract` for CLI users
+
+Notes:
+
+- The desktop app already embeds a PNG for the runtime window icon, but Finder app icons require an `.icns` file. If you want a custom Finder icon, add `AppIcon.icns` under `Contents/Resources` and set `CFBundleIconFile` in `Info.plist`.
+- For personal/internal distribution, the unsigned DMG above is enough. For public distribution, you should also `codesign`, notarize, and staple both the `.app` and the final DMG.
+
 ## Verification
 
 Recommended checks:
