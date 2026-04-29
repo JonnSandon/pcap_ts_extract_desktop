@@ -54,13 +54,20 @@ fn main() -> Result<()> {
 
     let report = pcap_ts_core::extract_pcap_to_ts(
         &args.input,
-        if args.dry_run { None } else { Some(&args.output) },
+        if args.dry_run {
+            None
+        } else {
+            Some(&args.output)
+        },
         &cfg,
     )?;
 
     eprintln!("PCAP frames seen:            {}", report.frames_total);
     eprintln!("UDP frames matched filters:  {}", report.udp_matched);
-    eprintln!("TS packet size detected:     {}", report.detected_ts_packet_size);
+    eprintln!(
+        "TS packet size detected:     {}",
+        report.detected_ts_packet_size
+    );
     eprintln!("TS packets written:          {}", report.ts_packets_written);
     if cfg.dry_run {
         eprintln!("Dry run: no output written");

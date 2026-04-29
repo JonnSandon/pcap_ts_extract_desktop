@@ -8,17 +8,16 @@
 //!
 //! This crate exposes a small API surface so it can be used by both the CLI and GUI frontends.
 
-use anyhow::{anyhow, Context, Result};
-use etherparse::{PacketHeaders, TransportHeader};
-use pcap_parser::data::{get_packetdata, PacketData};
+use anyhow::{Context, Result, anyhow};
+use etherparse::{PacketHeaders, TransportHeader, UdpSlice};
+use pcap_parser::data::{PacketData, get_packetdata};
 use pcap_parser::traits::PcapNGPacketBlock;
 use pcap_parser::*;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
-
+use std::time::{Duration, Instant};
 
 /// Configuration for a PCAP extraction run.
 #[derive(Debug, Clone)]
@@ -72,6 +71,13 @@ pub struct ExtractReport {
     pub output: Option<PathBuf>,
     /// Total elapsed time.
     pub elapsed: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UdpDatagram<'a> {
+    source_port: u16,
+    destination_port: u16,
+    payload: &'a [u8],
 }
 
 /// Heuristically determine if a payload appears to be RTP.
@@ -253,6 +259,60 @@ fn detect_ts_packet_size(buf: &[u8], sync_checks: usize) -> Option<usize> {
     best.map(|(_, size)| size)
 }
 
+fn get_packetdata_loop(i: &[u8], caplen: usize) -> Option<PacketData<'_>> {
+    if i.len() < caplen || caplen < 4 {
+        return None;
+    }
+
+    let vers = u32::from_be_bytes(i[..4].try_into().ok()?);
+    let ethertype = match vers {
+        2 => pcap_parser::data::ETHERTYPE_IPV4,
+        24 | 28 | 30 => pcap_parser::data::ETHERTYPE_IPV6,
+        _ => 0,
+    };
+
+    Some(PacketData::L3(ethertype, &i[4..caplen]))
+}
+
+fn get_packetdata_for_linktype<'a>(
+    data: &'a [u8],
+    linktype: Linktype,
+    caplen: usize,
+) -> Option<PacketData<'a>> {
+    match linktype {
+        Linktype::LOOP => get_packetdata_loop(data, caplen),
+        _ => get_packetdata(data, linktype, caplen),
+    }
+}
+
+fn udp_datagram_from_headers(headers: PacketHeaders<'_>) -> Option<UdpDatagram<'_>> {
+    match headers.transport {
+        Some(TransportHeader::Udp(udp_hdr)) => Some(UdpDatagram {
+            source_port: udp_hdr.source_port,
+            destination_port: udp_hdr.destination_port,
+            payload: headers.payload.slice(),
+        }),
+        _ => None,
+    }
+}
+
+fn udp_datagram_from_packet_data(packet_data: PacketData<'_>) -> Option<UdpDatagram<'_>> {
+    match packet_data {
+        PacketData::L2(data) => PacketHeaders::from_ethernet_slice(data)
+            .ok()
+            .and_then(udp_datagram_from_headers),
+        PacketData::L3(_, data) => PacketHeaders::from_ip_slice(data)
+            .ok()
+            .and_then(udp_datagram_from_headers),
+        PacketData::L4(17, data) => UdpSlice::from_slice(data).ok().map(|udp| UdpDatagram {
+            source_port: udp.source_port(),
+            destination_port: udp.destination_port(),
+            payload: udp.payload(),
+        }),
+        PacketData::L4(_, _) | PacketData::Unsupported(_) => None,
+    }
+}
+
 /// Extract packet data and normalize link-layer framing across pcap/pcapng linktypes.
 fn extract_packet_data<'a>(
     block: &'a PcapBlockOwned<'a>,
@@ -262,7 +322,7 @@ fn extract_packet_data<'a>(
     match block {
         PcapBlockOwned::Legacy(b) => {
             let linktype = legacy_linktype.unwrap_or(Linktype::ETHERNET);
-            get_packetdata(b.data, linktype, b.caplen as usize)
+            get_packetdata_for_linktype(b.data, linktype, b.caplen as usize)
         }
         PcapBlockOwned::LegacyHeader(_) => None,
         PcapBlockOwned::NG(b) => match b {
@@ -272,12 +332,12 @@ fn extract_packet_data<'a>(
                     .copied()
                     .unwrap_or(Linktype::ETHERNET);
                 let data = epb.packet_data();
-                get_packetdata(data, linktype, data.len())
+                get_packetdata_for_linktype(data, linktype, data.len())
             }
             Block::SimplePacket(spb) => {
                 let linktype = if_linktypes.get(0).copied().unwrap_or(Linktype::ETHERNET);
                 let data = spb.packet_data();
-                get_packetdata(data, linktype, data.len())
+                get_packetdata_for_linktype(data, linktype, data.len())
             }
             _ => None,
         },
@@ -337,8 +397,10 @@ pub fn extract_pcap_to_ts_with_events<F: FnMut(ExtractEvent)>(
     let out: Box<dyn Write> = if cfg.dry_run {
         Box::new(std::io::sink())
     } else {
-        let out_path = output.ok_or_else(|| anyhow!("output path is required unless dry_run=true"))?;
-        let out_f = File::create(out_path).with_context(|| format!("create output {:?}", out_path))?;
+        let out_path =
+            output.ok_or_else(|| anyhow!("output path is required unless dry_run=true"))?;
+        let out_f =
+            File::create(out_path).with_context(|| format!("create output {:?}", out_path))?;
         Box::new(BufWriter::new(out_f))
     };
 
@@ -367,7 +429,10 @@ pub fn extract_pcap_to_ts_with_events<F: FnMut(ExtractEvent)>(
                 frames_total += 1;
 
                 if frames_total % progress_every == 0 {
-                    on_event(ExtractEvent::Frame { frames_total, udp_matched });
+                    on_event(ExtractEvent::Frame {
+                        frames_total,
+                        udp_matched,
+                    });
                     if let Some(tsw) = tsw.as_ref() {
                         on_event(ExtractEvent::WrittenPackets {
                             ts_packets_written: tsw.written_packets,
@@ -392,61 +457,54 @@ pub fn extract_pcap_to_ts_with_events<F: FnMut(ExtractEvent)>(
                     _ => {}
                 }
 
-                if let Some(packet_data) = extract_packet_data(&block, legacy_linktype, &if_linktypes)
+                if let Some(packet_data) =
+                    extract_packet_data(&block, legacy_linktype, &if_linktypes)
                 {
-                    let headers = match packet_data {
-                        PacketData::L2(data) => PacketHeaders::from_ethernet_slice(data).ok(),
-                        PacketData::L3(_, data) => PacketHeaders::from_ip_slice(data).ok(),
-                        PacketData::L4(_, _) | PacketData::Unsupported(_) => None,
-                    };
-
-                    if let Some(headers) = headers {
-                        if let Some(TransportHeader::Udp(udp_hdr)) = headers.transport {
-                            if let Some(dp) = cfg.dst_port {
-                                if udp_hdr.destination_port != dp {
-                                    pcap.consume(offset);
-                                    continue;
-                                }
+                    if let Some(udp) = udp_datagram_from_packet_data(packet_data) {
+                        if let Some(dp) = cfg.dst_port {
+                            if udp.destination_port != dp {
+                                pcap.consume(offset);
+                                continue;
                             }
-                            if let Some(sp) = cfg.src_port {
-                                if udp_hdr.source_port != sp {
-                                    pcap.consume(offset);
-                                    continue;
-                                }
+                        }
+                        if let Some(sp) = cfg.src_port {
+                            if udp.source_port != sp {
+                                pcap.consume(offset);
+                                continue;
                             }
+                        }
 
-                            udp_matched += 1;
+                        udp_matched += 1;
 
-                            let mut payload: &[u8] = headers.payload.slice();
-                            if cfg.strip_rtp {
-                                payload = strip_rtp(payload);
+                        let mut payload = udp.payload;
+                        if cfg.strip_rtp {
+                            payload = strip_rtp(payload);
+                        }
+
+                        if let Some(tsw) = tsw.as_mut() {
+                            tsw.push_payload(payload)?;
+                        } else {
+                            detect_buf.extend_from_slice(payload);
+                            if detect_buf.len() > max_detect_buf {
+                                let drop = detect_buf.len() - max_detect_buf;
+                                detect_buf.drain(..drop);
                             }
+                            if detected_packet_size.is_none() {
+                                detected_packet_size =
+                                    detect_ts_packet_size(&detect_buf, cfg.sync_checks);
+                                if let Some(size) = detected_packet_size {
+                                    on_event(ExtractEvent::DetectedPacketSize { size });
 
-                            if let Some(tsw) = tsw.as_mut() {
-                                tsw.push_payload(payload)?;
-                            } else {
-                                detect_buf.extend_from_slice(payload);
-                                if detect_buf.len() > max_detect_buf {
-                                    let drop = detect_buf.len() - max_detect_buf;
-                                    detect_buf.drain(..drop);
-                                }
-                                if detected_packet_size.is_none() {
-                                    detected_packet_size =
-                                        detect_ts_packet_size(&detect_buf, cfg.sync_checks);
-                                    if let Some(size) = detected_packet_size {
-                                        on_event(ExtractEvent::DetectedPacketSize { size });
-
-                                        let writer = out_writer
-                                            .take()
-                                            .ok_or_else(|| anyhow!("missing output writer"))?;
-                                        let mut new_tsw =
-                                            TsResyncWriter::new(writer, size, cfg.sync_checks);
-                                        if !detect_buf.is_empty() {
-                                            new_tsw.push_payload(&detect_buf)?;
-                                            detect_buf.clear();
-                                        }
-                                        tsw = Some(new_tsw);
+                                    let writer = out_writer
+                                        .take()
+                                        .ok_or_else(|| anyhow!("missing output writer"))?;
+                                    let mut new_tsw =
+                                        TsResyncWriter::new(writer, size, cfg.sync_checks);
+                                    if !detect_buf.is_empty() {
+                                        new_tsw.push_payload(&detect_buf)?;
+                                        detect_buf.clear();
                                     }
+                                    tsw = Some(new_tsw);
                                 }
                             }
                         }
@@ -494,14 +552,53 @@ pub fn extract_pcap_to_ts_with_events<F: FnMut(ExtractEvent)>(
     }
 
     let elapsed = start.elapsed();
-    on_event(ExtractEvent::Frame { frames_total, udp_matched });
+    on_event(ExtractEvent::Frame {
+        frames_total,
+        udp_matched,
+    });
 
     Ok(ExtractReport {
         frames_total,
         udp_matched,
         detected_ts_packet_size: detected_packet_size.unwrap_or(188),
         ts_packets_written: written_packets,
-        output: if cfg.dry_run { None } else { output.map(|p| p.to_path_buf()) },
+        output: if cfg.dry_run {
+            None
+        } else {
+            output.map(|p| p.to_path_buf())
+        },
         elapsed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_linktype_decodes_ipv4_payload() {
+        let bytes = [0, 0, 0, 2, 0x45, 0x00, 0x00, 0x14];
+        let packet = get_packetdata_loop(&bytes, bytes.len()).expect("loopback packet");
+
+        match packet {
+            PacketData::L3(ethertype, payload) => {
+                assert_eq!(ethertype, pcap_parser::data::ETHERTYPE_IPV4);
+                assert_eq!(payload, &[0x45, 0x00, 0x00, 0x14]);
+            }
+            other => panic!("unexpected packet data: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wireshark_upper_pdu_udp_is_accepted() {
+        let udp = [
+            0x13, 0x8c, 0x13, 0x8d, 0x00, 0x0c, 0x00, 0x00, 0x47, 0x40, 0x00, 0x10,
+        ];
+        let datagram =
+            udp_datagram_from_packet_data(PacketData::L4(17, &udp)).expect("udp datagram");
+
+        assert_eq!(datagram.source_port, 5004);
+        assert_eq!(datagram.destination_port, 5005);
+        assert_eq!(datagram.payload, &[0x47, 0x40, 0x00, 0x10]);
+    }
 }

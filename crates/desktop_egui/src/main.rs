@@ -1,16 +1,15 @@
-﻿#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 //! Desktop GUI frontend built with eframe/egui.
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use eframe::egui;
 use std::path::PathBuf;
-use std::thread;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
-
+use std::thread;
 
 /// Worker thread messages sent back to the UI.
 enum Msg {
@@ -18,7 +17,6 @@ enum Msg {
     Progress(pcap_ts_core::ExtractEvent),
     Done(anyhow::Result<pcap_ts_core::ExtractReport>),
 }
-
 
 /// Application state for the desktop UI.
 struct DesktopApp {
@@ -33,7 +31,6 @@ struct DesktopApp {
     sync_checks: usize,
     dry_run: bool,
     cancel: Arc<AtomicBool>,
-
 
     // state
     running: bool,
@@ -71,7 +68,6 @@ impl DesktopApp {
         self.log.clear();
         self.cancel.store(false, Ordering::Relaxed);
 
-
         let input = match self.input.clone() {
             Some(p) => p,
             None => {
@@ -104,7 +100,8 @@ impl DesktopApp {
         self.rx = Some(rx);
         self.running = true;
 
-        tx.send(Msg::Log(format!("Input:  {}", input.display()))).ok();
+        tx.send(Msg::Log(format!("Input:  {}", input.display())))
+            .ok();
         if let Some(out) = &output {
             tx.send(Msg::Log(format!("Output: {}", out.display()))).ok();
         } else {
@@ -118,57 +115,56 @@ impl DesktopApp {
 
         let cancel = self.cancel.clone();
         thread::spawn(move || run_job(tx, input, output, cfg, cancel));
-
     }
 
     /// Poll the worker channel and update the UI state.
     fn poll(&mut self) {
-    let Some(rx) = self.rx.take() else { return; };
+        let Some(rx) = self.rx.take() else {
+            return;
+        };
 
-    let mut done = false;
+        let mut done = false;
 
-    while let Ok(msg) = rx.try_recv() {
-        match msg {
-            Msg::Log(s) => self.log.push(s),
-            Msg::Done(res) => {
-                self.running = false;
-                done = true;
-                match res {
-                    Ok(r) => self.last_report = Some(r),
-                    Err(e) => self.last_error = Some(format!("{:#}", e)),
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                Msg::Log(s) => self.log.push(s),
+                Msg::Done(res) => {
+                    self.running = false;
+                    done = true;
+                    match res {
+                        Ok(r) => self.last_report = Some(r),
+                        Err(e) => self.last_error = Some(format!("{:#}", e)),
+                    }
                 }
-            }
-            Msg::Progress(ev) => {
-                match ev {
-                    pcap_ts_core::ExtractEvent::Frame { frames_total, udp_matched } => {
+                Msg::Progress(ev) => match ev {
+                    pcap_ts_core::ExtractEvent::Frame {
+                        frames_total,
+                        udp_matched,
+                    } => {
                         self.log.push(format!(
                             "Frames={} UDP matched={}",
                             frames_total, udp_matched
                         ));
-                    
-                    
                     }
                     pcap_ts_core::ExtractEvent::DetectedPacketSize { size } => {
                         self.log.push(format!("Detected TS packet size: {}", size));
                     }
                     pcap_ts_core::ExtractEvent::WrittenPackets { ts_packets_written } => {
-                        self.log.push(format!("TS packets written: {}", ts_packets_written));
+                        self.log
+                            .push(format!("TS packets written: {}", ts_packets_written));
                     }
-                }
+                },
             }
-
+            if done {
+                break;
+            }
         }
-        if done {
-            break;
+
+        // Put the receiver back only if we are still running and want to keep listening.
+        if !done {
+            self.rx = Some(rx);
         }
     }
-
-    // Put the receiver back only if we are still running and want to keep listening.
-    if !done {
-        self.rx = Some(rx);
-    }
-}
-
 }
 
 /// Worker entrypoint for running extraction off the UI thread.
@@ -191,7 +187,6 @@ fn run_job(
 
     tx.send(Msg::Done(res)).ok();
 }
-
 
 impl eframe::App for DesktopApp {
     /// Render the UI and handle interactions.
@@ -296,8 +291,14 @@ impl eframe::App for DesktopApp {
                 ui.separator();
                 ui.label(format!("PCAP frames seen:            {}", r.frames_total));
                 ui.label(format!("UDP frames matched filters:  {}", r.udp_matched));
-                ui.label(format!("TS packet size detected:     {}", r.detected_ts_packet_size));
-                ui.label(format!("TS packets written:          {}", r.ts_packets_written));
+                ui.label(format!(
+                    "TS packet size detected:     {}",
+                    r.detected_ts_packet_size
+                ));
+                ui.label(format!(
+                    "TS packets written:          {}",
+                    r.ts_packets_written
+                ));
                 if let Some(out) = &r.output {
                     ui.label(format!("Output: {}", out.display()));
                 } else {
@@ -312,11 +313,13 @@ impl eframe::App for DesktopApp {
 
             ui.separator();
             ui.label("Log:");
-            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                for line in &self.log {
-                    ui.monospace(line);
-                }
-            });
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    for line in &self.log {
+                        ui.monospace(line);
+                    }
+                });
         });
 
         // keep UI responsive
@@ -353,7 +356,6 @@ fn main() -> eframe::Result<()> {
         Box::new(|_cc| Ok(Box::new(DesktopApp::default()))),
     )
 }
-
 
 /// Load the embedded application icon (PNG, 256x256) for window/taskbar use.
 fn load_app_icon() -> Option<egui::IconData> {

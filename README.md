@@ -1,128 +1,168 @@
 # pcap_ts_extract
 
-Extract MPEG-TS packets from UDP (optionally RTP) inside PCAP/PCAPNG files. This repo is set up as a teaching tool for practical Rust: clear data flow, small API surface, and documentation that maps directly to the code you can read and test.
+Extract MPEG-TS packets from UDP-oriented captures in `pcap` and `pcapng`, with CLI and desktop frontends backed by a shared Rust core.
 
-## Repository layout
+The project has moved beyond a minimal extractor. The next phase is to treat capture parsing as a protocol-normalization problem rather than a single Ethernet-to-UDP happy path.
 
-- `crates/core`: Library crate with the extraction engine and evented API.
-- `crates/cli`: Command-line frontend using `clap`.
-- `crates/desktop_egui`: Desktop GUI frontend using `eframe/egui`.
-- `resources`: App icon and related assets.
+## Status
 
-## Architectural overview
+Current capabilities:
 
-The core design is deliberately linear and observable:
+- Parse legacy `pcap` and `pcapng`
+- Handle multiple link-layer presentations through `pcap-parser`
+- Extract UDP payloads from Ethernet, raw IP, Linux cooked captures, loopback-style captures, and Wireshark upper-PDU exports
+- Optionally strip RTP before MPEG-TS re-sync
+- Detect TS packet sizes `188`, `192`, and `204`
+- Run as either CLI or desktop GUI
 
-1) Read capture blocks (PCAP or PCAPNG) with `pcap-parser`.
-2) Normalize link-layer framing (Ethernet/IP) and parse transport headers with `etherparse`.
-3) Filter UDP frames by optional source/destination ports.
-4) Optionally strip RTP headers.
-5) Detect MPEG-TS packet size (188/192/204) using sync byte heuristics.
-6) Re-sync packet boundaries and stream aligned TS packets to output.
+Known limitation:
 
-The CLI and desktop app are thin wrappers that translate user input into `pcap_ts_core::ExtractConfig` and display `ExtractReport` plus progress events.
+- The extractor still assumes the useful TS payload becomes visible once the packet is reduced to UDP payload. That will not hold for every contribution/distribution protocol. Some captures contain an additional shim or tunnel header between UDP and TS.
 
-## Crate documentation map
+## Repository Layout
 
-### `pcap_ts_core` (library)
+- `crates/core`: shared extraction engine and progress/event API
+- `crates/cli`: command-line frontend
+- `crates/desktop_egui`: desktop GUI frontend
+- `resources`: icons and image assets
+- `ROADMAP.md`: product and architecture direction
 
-Key types and functions (see `crates/core/src/lib.rs` for full rustdoc):
+## Architecture
 
-- `ExtractConfig`: Options for filtering, RTP stripping, sync detection, and dry runs.
-- `ExtractEvent`: Progress events for UIs or logging.
-- `ExtractReport`: Summary of an extraction run.
-- `extract_pcap_to_ts`: Simple synchronous API.
-- `extract_pcap_to_ts_with_events`: Evented API with cancellation.
-- `TsResyncWriter`: Internal buffering and re-sync logic for TS alignment.
-- `detect_ts_packet_size`: Heuristic for TS packet size detection.
-- `strip_rtp` and `looks_like_rtp`: Lightweight RTP header handling.
+Today the core pipeline is:
 
-### `pcap_ts_extract` (CLI)
+1. Read capture blocks with `pcap-parser`
+2. Normalize link-layer framing into packet data
+3. Recover UDP datagrams
+4. Optionally strip RTP
+5. Detect TS packet size using sync heuristics
+6. Re-sync and stream aligned TS packets to output
 
-`crates/cli/src/main.rs` is intentionally small:
+This works for direct UDP/RTP carriage. The next architectural step is to split stage 4 into a more explicit payload-normalization layer:
 
-- Parse arguments.
-- Build `ExtractConfig`.
-- Call `extract_pcap_to_ts`.
-- Print a human-readable summary.
+1. UDP payload
+2. Encapsulation probe
+3. Optional decapsulation
+4. TS detection and extraction
 
-### `pcap_ts_desktop` (GUI)
+That change is important if the project is going to support captures containing:
 
-`crates/desktop_egui/src/main.rs` shows an idiomatic evented UI:
+- RTP with extensions
+- RIST-adjacent shims or GRE-based carriage
+- SRT-derived payload framing
+- vendor-specific 16-byte or 20-byte transport shims
+- nested tunnel formats discovered from field captures
 
-- A `DesktopApp` state machine.
-- A background worker thread for extraction.
-- A channel for log/progress messages.
-- A small cancel flag for cooperative shutdown.
+## Crates
 
-## Teaching highlights (Rust concepts in practice)
+### `pcap_ts_core`
 
-- Ownership across threads: `Arc<AtomicBool>` and `crossbeam-channel`.
-- Error handling with `anyhow` and contextual errors.
-- Bounded buffering and streaming I/O with `BufReader`/`BufWriter`.
-- Simple state machines in UI code.
-- Clean API surface that supports both CLI and GUI.
+Main types in [crates/core/src/lib.rs](/c:/Others/rust/pcap_ts_extract/crates/core/src/lib.rs:1):
 
-## Quick start
+- `ExtractConfig`: filtering and extraction options
+- `ExtractEvent`: progress notifications for UI/logging
+- `ExtractReport`: extraction summary
+- `extract_pcap_to_ts`: synchronous API
+- `extract_pcap_to_ts_with_events`: evented API with cancellation
 
-Build all crates:
+The core crate should remain the protocol-analysis and extraction engine. Frontends should stay thin.
 
-```bash
+### `pcap_ts_extract`
+
+The CLI in [crates/cli/src/main.rs](/c:/Others/rust/pcap_ts_extract/crates/cli/src/main.rs:1) is intentionally narrow:
+
+- parse arguments
+- build `ExtractConfig`
+- invoke the core library
+- print a concise report
+
+### `pcap_ts_desktop`
+
+The desktop app in [crates/desktop_egui/src/main.rs](/c:/Others/rust/pcap_ts_extract/crates/desktop_egui/src/main.rs:1) provides:
+
+- file selection
+- runtime progress
+- cancellation
+- a lightweight operator-facing UI for inspecting extraction runs
+
+## Build And Run
+
+Build everything:
+
+```powershell
 cargo build
 ```
 
 Run the CLI:
 
-```bash
+```powershell
 cargo run -p pcap_ts_extract -- --input capture.pcapng --output output.ts --dst-port 5004
 ```
 
-Dry run (stats only):
+Run a dry run:
 
-```bash
+```powershell
 cargo run -p pcap_ts_extract -- --input capture.pcapng --output output.ts --dry-run
 ```
 
 Run the desktop app:
 
-```bash
+```powershell
 cargo run -p pcap_ts_desktop
 ```
 
-## Test harness and documentation
+## Verification
 
-Rust makes docs executable. The core API includes a `no_run` example so `cargo test` and `cargo test --doc` exercise it without needing an actual PCAP file.
+Recommended checks:
 
-Suggested commands:
-
-```bash
-# Run unit and doc tests for the core library
-cargo test -p pcap_ts_core
-
-# Run doc tests only (includes README examples if you add them to rustdoc)
+```powershell
+cargo test
 cargo test -p pcap_ts_core --doc
-
-# Build docs and open locally
-cargo doc -p pcap_ts_core --open
 ```
 
-Desktop crate tests:
+Rust toolchain:
 
-```bash
-# Run desktop unit tests (basic state + icon decode)
-cargo test -p pcap_ts_desktop
-```
+- pinned in `rust-toolchain.toml`
+- currently validated on Rust `1.95.0`
 
-Note: the desktop crate is a GUI binary, so there are no UI snapshot tests by default. The included tests are light sanity checks; for full verification, run the app and exercise the workflow manually.
+## Investigating Unknown Shims
 
-## Roadmap ideas
+Some real-world captures do not expose TS immediately after UDP or RTP. A recurring field symptom is a fixed-size shim, often around `16` bytes, before TS sync begins.
 
-- Add optional PCR/PTS timing reports for teaching timebase concepts.
-- Add a small sample PCAP and a golden TS file for regression tests.
-- Extend RTP handling to parse header fields for richer debug output.
-- Add CLI output formats (CSV/JSON) for scripting.
-- Add a library-level `Iterator` API for streaming TS packets.
+Working hypothesis:
 
-## Contribution notes
+- A fixed 16-byte header after UDP could be a transport shim, tunnel metadata, or contribution-protocol wrapper
+- RIST is a plausible candidate in some workflows
+- SRT is also plausible in environments where the payload is carried over UDP but the apparent application payload is not direct TS
 
-This project is meant to be read. If you add features, keep the flow simple and document the "why" as much as the "what".
+Current field finding:
+
+- sample capture `dump_rt_gw_28042026_1340.pcap` was inspected outside the repo
+- capture link type is `LINKTYPE_LINUX_SLL2`
+- dominant media flow is `40821 -> 5020`
+- MPEG-TS sync byte `0x47` appears at payload offset `+16` consistently on the dominant flow
+- the next sync byte also appears at `+204`, which matches `16-byte shim + 188-byte TS`
+- reverse traffic on `5020 -> 40821` does not show the same TS structure and looks like control/feedback traffic
+
+This is strong evidence for a 16-byte transport header ahead of TS. Based on packet shape alone, this looks more SRT/UDT-like than RTP, and more likely SRT-like than RIST. That is still an inference until we add a decoder and validate it across more than one capture.
+
+This should be treated as a capture-analysis problem, not guessed in code. The correct workflow is:
+
+1. Identify the link type used by the capture
+2. Identify the UDP 5-tuple carrying the media flow
+3. Inspect the first bytes after UDP
+4. Check whether `0x47` appears at a stable offset such as `+12`, `+16`, or `+20`
+5. Determine whether the offset is constant across packets
+6. Promote that pattern into a decoder only after it is confirmed on sample data
+
+## Documentation Direction
+
+The project should now document:
+
+- supported capture/link types
+- supported payload normalizations
+- confirmed encapsulations
+- unconfirmed hypotheses from field captures
+- regression samples used to validate decapsulation logic
+
+That work starts here and continues in [ROADMAP.md](/c:/Others/rust/pcap_ts_extract/ROADMAP.md:1).
